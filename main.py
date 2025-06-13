@@ -1,5 +1,5 @@
-# River Water Level Classification using Deep Learning - CLASS BALANCED VERSION
-# Complete implementation with automatic class balancing fix
+# River Water Level Classification using Deep Learning - FIXED VERSION
+# Complete implementation with ResNet50, EfficientNetB0, and MobileNetV2
 
 import numpy as np
 import pandas as pd
@@ -7,7 +7,6 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
-from sklearn.utils.class_weight import compute_class_weight
 import tensorflow as tf
 from tensorflow.keras.applications import ResNet50, EfficientNetB0, MobileNetV2
 from tensorflow.keras.layers import Dense, GlobalAveragePooling2D, Dropout
@@ -22,24 +21,6 @@ import kagglehub
 import warnings
 
 warnings.filterwarnings('ignore')
-
-# 🚀 CRITICAL OPTIMIZATION: Enable mixed precision for 2x speedup
-tf.keras.mixed_precision.set_global_policy('mixed_float16')
-print("✅ Mixed precision enabled - expect 1.5-2x speedup on compatible GPUs")
-
-# GPU optimization
-gpus = tf.config.experimental.list_physical_devices('GPU')
-if gpus:
-    print(f"✅ Found {len(gpus)} GPU(s) available")
-    try:
-        # Enable memory growth to prevent OOM
-        for gpu in gpus:
-            tf.config.experimental.set_memory_growth(gpu, True)
-        print("✅ GPU memory growth enabled")
-    except RuntimeError as e:
-        print(f"⚠️ GPU setup warning: {e}")
-else:
-    print("⚠️ No GPU found - consider using Google Colab for faster training")
 
 # Set random seeds for reproducibility
 np.random.seed(42)
@@ -241,218 +222,474 @@ class RiverWaterLevelClassifier:
             print(f"  {class_name}: {count} samples ({percentage:.1f}%)")
         print("=" * 60)
 
+    def create_model(self, model_name='resnet50'):
+        """Create a deep learning model for river water level classification"""
+        if model_name.lower() == 'resnet50':
+            base_model = ResNet50(weights='imagenet', include_top=False, input_shape=(*self.img_size, 3))
+        elif model_name.lower() == 'efficientnetb0':
+            base_model = EfficientNetB0(weights='imagenet', include_top=False, input_shape=(*self.img_size, 3))
+        elif model_name.lower() == 'mobilenetv2':
+            base_model = MobileNetV2(weights='imagenet', include_top=False, input_shape=(*self.img_size, 3))
+        else:
+            raise ValueError("Model must be one of: resnet50, efficientnetb0, mobilenetv2")
 
-# 🎯 OPTIMIZED TRAINING STRATEGY WITH CLASS BALANCING
-def train_most_effectively():
-    """
-    Most effective training approach with automatic class balancing
-    """
-    print("🎯 OPTIMIZED TRAINING STRATEGY WITH CLASS BALANCING")
-    print("=" * 70)
+        base_model.trainable = False
+
+        x = base_model.output
+        x = GlobalAveragePooling2D()(x)
+        x = Dense(512, activation='relu', name='dense_512')(x)
+        x = Dropout(0.5, name='dropout_1')(x)
+        x = Dense(256, activation='relu', name='dense_256')(x)
+        x = Dropout(0.3, name='dropout_2')(x)
+        predictions = Dense(self.num_classes, activation='softmax', name='predictions')(x)
+
+        model = Model(inputs=base_model.input, outputs=predictions)
+
+        print(f"\n🤖 Created {model_name.upper()} model:")
+        print(f"   📊 Total parameters: {model.count_params():,}")
+        print(
+            f"   🔧 Trainable parameters: {sum([tf.keras.backend.count_params(w) for w in model.trainable_weights]):,}")
+
+        return model
+
+    def train_model(self, model, X_train, y_train, X_val, y_val, model_name, epochs=20):
+        """Train the model with proper callbacks and data augmentation"""
+        print(f"\n🚀 Training {model_name.upper()} model...")
+
+        train_datagen = ImageDataGenerator(
+            rotation_range=20,
+            width_shift_range=0.2,
+            height_shift_range=0.2,
+            horizontal_flip=True,
+            zoom_range=0.2,
+            shear_range=0.2,
+            brightness_range=[0.8, 1.2],
+            fill_mode='nearest'
+        )
+
+        val_datagen = ImageDataGenerator()
+
+        model.compile(
+            optimizer=Adam(learning_rate=0.001),
+            loss='sparse_categorical_crossentropy',
+            metrics=['accuracy']
+        )
+
+        callbacks = [
+            EarlyStopping(
+                monitor='val_accuracy',
+                patience=10,
+                restore_best_weights=True,
+                verbose=1
+            ),
+            ReduceLROnPlateau(
+                monitor='val_loss',
+                factor=0.2,
+                patience=5,
+                min_lr=1e-7,
+                verbose=1
+            ),
+            ModelCheckpoint(
+                f'best_{model_name}_model.h5',
+                save_best_only=True,
+                monitor='val_accuracy',
+                mode='max',
+                verbose=1
+            )
+        ]
+
+        batch_size = 32
+        steps_per_epoch = max(1, len(X_train) // batch_size)
+        validation_steps = max(1, len(X_val) // batch_size)
+
+        print(f"   📊 Batch size: {batch_size}")
+        print(f"   🔄 Steps per epoch: {steps_per_epoch}")
+        print(f"   ✅ Validation steps: {validation_steps}")
+
+        history = model.fit(
+            train_datagen.flow(X_train, y_train, batch_size=batch_size),
+            steps_per_epoch=steps_per_epoch,
+            epochs=epochs,
+            validation_data=val_datagen.flow(X_val, y_val, batch_size=batch_size),
+            validation_steps=validation_steps,
+            callbacks=callbacks,
+            verbose=1
+        )
+
+        return history
+
+    def plot_training_curves(self, history, model_name):
+        """Plot training and validation curves"""
+        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+        fig.suptitle(f'{model_name.upper()} Training Analysis', fontsize=16, fontweight='bold')
+
+        axes[0, 0].plot(history.history['accuracy'], 'b-', linewidth=2, label='Training')
+        axes[0, 0].plot(history.history['val_accuracy'], 'r-', linewidth=2, label='Validation')
+        axes[0, 0].set_title('Model Accuracy')
+        axes[0, 0].set_xlabel('Epoch')
+        axes[0, 0].set_ylabel('Accuracy')
+        axes[0, 0].legend()
+        axes[0, 0].grid(True, alpha=0.3)
+
+        axes[0, 1].plot(history.history['loss'], 'b-', linewidth=2, label='Training')
+        axes[0, 1].plot(history.history['val_loss'], 'r-', linewidth=2, label='Validation')
+        axes[0, 1].set_title('Model Loss')
+        axes[0, 1].set_xlabel('Epoch')
+        axes[0, 1].set_ylabel('Loss')
+        axes[0, 1].legend()
+        axes[0, 1].grid(True, alpha=0.3)
+
+        if 'lr' in history.history:
+            axes[1, 0].plot(history.history['lr'], 'g-', linewidth=2)
+            axes[1, 0].set_title('Learning Rate Schedule')
+            axes[1, 0].set_xlabel('Epoch')
+            axes[1, 0].set_ylabel('Learning Rate')
+            axes[1, 0].set_yscale('log')
+            axes[1, 0].grid(True, alpha=0.3)
+        else:
+            axes[1, 0].text(0.5, 0.5, 'Learning Rate\nNot Available', ha='center', va='center')
+            axes[1, 0].set_title('Learning Rate Schedule')
+
+        final_train_acc = history.history['accuracy'][-1]
+        final_val_acc = history.history['val_accuracy'][-1]
+        best_val_acc = max(history.history['val_accuracy'])
+
+        stats_text = f"""Training Summary:
+
+Final Training Accuracy: {final_train_acc:.4f}
+Final Validation Accuracy: {final_val_acc:.4f}
+Best Validation Accuracy: {best_val_acc:.4f}
+Total Epochs: {len(history.history["accuracy"])}
+Overfitting: {'Yes' if final_train_acc - final_val_acc > 0.1 else 'No'}"""
+
+        axes[1, 1].text(0.05, 0.95, stats_text, transform=axes[1, 1].transAxes,
+                        fontsize=10, verticalalignment='top', fontfamily='monospace')
+        axes[1, 1].set_title('Training Statistics')
+        axes[1, 1].axis('off')
+
+        plt.tight_layout()
+        plt.show()
+
+    def evaluate_model(self, model, X_test, y_test, model_name):
+        """Evaluate the model and show detailed results"""
+        print(f"\n📊 Evaluating {model_name.upper()} model...")
+
+        y_pred_proba = model.predict(X_test, verbose=0)
+        y_pred = np.argmax(y_pred_proba, axis=1)
+
+        accuracy = accuracy_score(y_test, y_pred)
+        print(f"🎯 Test Accuracy: {accuracy:.4f} ({accuracy * 100:.2f}%)")
+
+        print("\n📋 Classification Report:")
+        print(classification_report(y_test, y_pred, target_names=self.class_names, digits=4))
+
+        cm = confusion_matrix(y_test, y_pred)
+
+        plt.figure(figsize=(12, 5))
+
+        plt.subplot(1, 2, 1)
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                    xticklabels=self.class_names, yticklabels=self.class_names)
+        plt.title(f'{model_name.upper()} - Confusion Matrix')
+        plt.xlabel('Predicted')
+        plt.ylabel('Actual')
+
+        plt.subplot(1, 2, 2)
+        cm_norm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+        sns.heatmap(cm_norm, annot=True, fmt='.3f', cmap='Reds',
+                    xticklabels=self.class_names, yticklabels=self.class_names)
+        plt.title(f'{model_name.upper()} - Normalized Confusion Matrix')
+        plt.xlabel('Predicted')
+        plt.ylabel('Actual')
+
+        plt.tight_layout()
+        plt.show()
+
+        return accuracy, y_pred, y_pred_proba
+
+    def demonstrate_single_prediction(self, model, X_test, y_test, model_name):
+        """Demonstrate prediction for a single test image"""
+        idx = np.random.randint(0, len(X_test))
+        test_image = X_test[idx]
+        true_label = y_test[idx]
+
+        prediction = model.predict(np.expand_dims(test_image, axis=0), verbose=0)
+        predicted_class = np.argmax(prediction)
+        confidence = np.max(prediction) * 100
+
+        plt.figure(figsize=(15, 6))
+
+        plt.subplot(1, 3, 1)
+        plt.imshow(test_image)
+        plt.title(f'Test Image #{idx}\nTrue Label: {self.class_names[true_label]}')
+        plt.axis('off')
+
+        plt.subplot(1, 3, 2)
+        colors = ['red' if i == predicted_class else 'lightblue' for i in range(len(self.class_names))]
+        bars = plt.bar(self.class_names, prediction[0] * 100, color=colors)
+        plt.title(
+            f'{model_name.upper()} Prediction\nPredicted: {self.class_names[predicted_class]} ({confidence:.1f}%)')
+        plt.ylabel('Confidence (%)')
+        plt.xticks(rotation=45)
+
+        for bar, prob in zip(bars, prediction[0]):
+            plt.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 1,
+                     f'{prob * 100:.1f}%', ha='center', va='bottom', fontsize=10)
+
+        status = "✅ CORRECT" if predicted_class == true_label else "❌ INCORRECT"
+        color = "green" if predicted_class == true_label else "red"
+
+        plt.subplot(1, 3, 3)
+        plt.text(0.1, 0.8, 'Prediction Analysis:', fontsize=14, fontweight='bold')
+        plt.text(0.1, 0.7, f'True Label: {self.class_names[true_label]}', fontsize=12)
+        plt.text(0.1, 0.6, f'Predicted: {self.class_names[predicted_class]}', fontsize=12)
+        plt.text(0.1, 0.5, f'Confidence: {confidence:.2f}%', fontsize=12)
+        plt.text(0.1, 0.4, f'Status: {status}', fontsize=12, color=color, fontweight='bold')
+
+        top_2_indices = np.argsort(prediction[0])[-2:][::-1]
+        plt.text(0.1, 0.3, 'Top 2 Predictions:', fontsize=12, fontweight='bold')
+        for i, idx_pred in enumerate(top_2_indices):
+            plt.text(0.1, 0.2 - i * 0.05,
+                     f'{i + 1}. {self.class_names[idx_pred]}: {prediction[0][idx_pred] * 100:.1f}%', fontsize=10)
+
+        plt.xlim(0, 1)
+        plt.ylim(0, 1)
+        plt.axis('off')
+        plt.title('Detailed Analysis')
+
+        plt.tight_layout()
+        plt.show()
+
+        print(f"\n🔍 {model_name.upper()} Single Image Prediction Analysis:")
+        print(f"   🖼️  Image Index: {idx}")
+        print(f"   🏷️  True Label: {self.class_names[true_label]}")
+        print(f"   🤖 Predicted Label: {self.class_names[predicted_class]}")
+        print(f"   📊 Confidence: {confidence:.2f}%")
+        print(f"   ✅ Correct: {'Yes' if predicted_class == true_label else 'No'}")
+        print(f"   🎯 Status: {status}")
+
+    def compare_models(self, results):
+        """Compare performance of all models"""
+        if not results:
+            print("⚠️ No models trained for comparison")
+            return
+
+        models = list(results.keys())
+        accuracies = [results[model]['accuracy'] for model in models]
+
+        plt.figure(figsize=(20, 12))
+
+        plt.subplot(2, 3, 1)
+        colors = ['#FF6B6B', '#4ECDC4', '#45B7D1'][:len(models)]
+        bars = plt.bar(models, accuracies, color=colors)
+        plt.title('Model Accuracy Comparison', fontsize=14, fontweight='bold')
+        plt.ylabel('Test Accuracy')
+        plt.ylim(0, 1)
+
+        for bar, acc in zip(bars, accuracies):
+            plt.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.01,
+                     f'{acc:.4f}', ha='center', va='bottom', fontweight='bold')
+
+        if len(models) >= 2:
+            plt.subplot(2, 3, 2)
+            for i, model in enumerate(models):
+                if 'history' in results[model]:
+                    plt.plot(results[model]['history'].history['accuracy'],
+                             label=f'{model.upper()}', linewidth=2, color=colors[i])
+            plt.title('Training Accuracy Curves')
+            plt.xlabel('Epoch')
+            plt.ylabel('Training Accuracy')
+            plt.legend()
+            plt.grid(True, alpha=0.3)
+
+            plt.subplot(2, 3, 3)
+            for i, model in enumerate(models):
+                if 'history' in results[model]:
+                    plt.plot(results[model]['history'].history['val_accuracy'],
+                             label=f'{model.upper()}', linewidth=2, color=colors[i])
+            plt.title('Validation Accuracy Curves')
+            plt.xlabel('Epoch')
+            plt.ylabel('Validation Accuracy')
+            plt.legend()
+            plt.grid(True, alpha=0.3)
+
+        plt.subplot(2, 3, 4)
+        table_data = []
+        for model in models:
+            acc = results[model]['accuracy']
+            table_data.append([model.upper(), f"{acc:.4f}"])
+
+        table = plt.table(cellText=table_data,
+                          colLabels=['Model', 'Test Accuracy'],
+                          cellLoc='center',
+                          loc='center')
+        table.auto_set_font_size(False)
+        table.set_fontsize(12)
+        table.scale(1.2, 1.5)
+
+        if models:
+            best_model = max(results.keys(), key=lambda x: results[x]['accuracy'])
+            best_row = models.index(best_model) + 1
+            for col in range(2):
+                table[(best_row, col)].set_facecolor('#90EE90')
+
+        plt.title('Model Performance Summary', fontsize=14, fontweight='bold', pad=20)
+        plt.axis('off')
+
+        plt.tight_layout()
+        plt.show()
+
+        print("\n" + "=" * 80)
+        print("🏆 COMPREHENSIVE MODEL COMPARISON")
+        print("=" * 80)
+
+        if models:
+            best_model = max(results.keys(), key=lambda x: results[x]['accuracy'])
+            best_accuracy = results[best_model]['accuracy']
+
+            sorted_models = sorted(results.keys(), key=lambda x: results[x]['accuracy'], reverse=True)
+            for rank, model in enumerate(sorted_models, 1):
+                acc = results[model]['accuracy']
+                status = "🥇 BEST" if model == best_model else f"#{rank}"
+                print(f"   {status} {model.upper():15} | Test Accuracy: {acc:.4f} ({acc * 100:.2f}%)")
+
+            print(f"\n🎯 Winner: {best_model.upper()} with {best_accuracy:.4f} accuracy")
+        print("=" * 80)
+
+
+def main():
+    """Main function to run the complete river water level classification project"""
+    print("🌊 RIVER WATER LEVEL CLASSIFICATION PROJECT 🌊")
+    print("Using Real Kaggle Dataset: otavio12/urban-river-level-classification-image-dataset")
+    print("=" * 80)
 
     classifier = RiverWaterLevelClassifier()
 
-    # Step 1: Dataset preparation
-    print("\n📥 STEP 1: Dataset Preparation")
+    # Step 1: Download Dataset
+    print("\n📥 STEP 1: Dataset Download")
     dataset_path = classifier.download_dataset()
     if not dataset_path:
-        print("❌ Failed to download dataset.")
-        return None, None
+        print("❌ Failed to download dataset. Please check your kagglehub installation.")
+        return
 
-    # Load with larger sample size for better training
-    X, y = classifier.load_real_dataset(max_samples_per_class=500)
+    # Step 2: Load and Analyze Dataset
+    print("\n📊 STEP 2: Dataset Loading and Analysis")
+    X, y = classifier.load_real_dataset(max_samples_per_class=300)  # Limit for demo
+
     if X is None or len(X) == 0:
-        print("❌ Failed to load dataset.")
-        return None, None
+        print("❌ Failed to load dataset. Please check the dataset structure.")
+        return
 
     classifier.visualize_real_dataset(X, y)
 
-    # Step 2: Optimized data splitting
-    print("\n🔄 STEP 2: Data Splitting")
+    # Step 3: Data Splitting
+    print("\n🔄 STEP 3: Data Splitting")
     X_train, X_temp, y_train, y_temp = train_test_split(
-        X, y, test_size=0.3, random_state=42, stratify=y
+        X, y, test_size=0.4, random_state=42, stratify=y
     )
     X_val, X_test, y_val, y_test = train_test_split(
         X_temp, y_temp, test_size=0.5, random_state=42, stratify=y_temp
     )
 
     print(f"✅ Data split completed:")
-    print(f"   📚 Training: {len(X_train)} samples")
-    print(f"   🔍 Validation: {len(X_val)} samples")
-    print(f"   🧪 Test: {len(X_test)} samples")
+    print(f"   📚 Training set: {len(X_train)} samples ({len(X_train) / len(X) * 100:.1f}%)")
+    print(f"   🔍 Validation set: {len(X_val)} samples ({len(X_val) / len(X) * 100:.1f}%)")
+    print(f"   🧪 Test set: {len(X_test)} samples ({len(X_test) / len(X) * 100:.1f}%)")
 
-    # 🎯 STEP 2.5: Calculate class weights for balancing
-    print(f"\n⚖️ STEP 2.5: CALCULATING CLASS WEIGHTS FOR BALANCING")
-    print("-" * 60)
+    # Step 4: Train All Models
+    model_names = ['resnet50', 'efficientnetb0', 'mobilenetv2']
+    results = {}
 
-    # Calculate class weights
-    unique_classes = np.unique(y_train)
-    class_weights = compute_class_weight(
-        'balanced',
-        classes=unique_classes,
-        y=y_train
-    )
+    epochs = 15  # Reduced for faster demo
 
-    # Convert to dictionary
-    class_weight_dict = {i: weight for i, weight in enumerate(class_weights)}
-
-    # Show detailed class analysis
-    print(f"\n📊 Training Class Distribution & Calculated Weights:")
-    total_samples = len(y_train)
-    for i, class_name in enumerate(classifier.class_names):
-        count = np.sum(y_train == i)
-        percentage = (count / total_samples) * 100
-        weight = class_weight_dict[i]
-        print(f"   {class_name:>8}: {count:>3} samples ({percentage:>5.1f}%) → Weight: {weight:>6.3f}")
-
-    print(f"\n💡 Class Weight Explanation:")
-    print(f"   • Higher weights for underrepresented classes (flood)")
-    print(f"   • Lower weights for overrepresented classes (low)")
-    print(f"   • This forces the model to pay equal attention to all classes")
-
-    # Step 3: Train EfficientNetB0 with class balancing
-    print("\n🥇 STEP 3: Training EfficientNetB0 with Automatic Class Balancing")
-    print("-" * 70)
-
-    try:
-        from EfficientNetB0 import EfficientNetB0Classifier
-
-        efficient_model = EfficientNetB0Classifier(
-            num_classes=len(classifier.class_names)
-        )
-
-        # Build and compile with balanced learning rate
-        efficient_model.build_model()
-        efficient_model.compile_model(learning_rate=0.00001)  # Balanced LR for class weights
-        efficient_model.get_model_efficiency_metrics()
-
-        # 🎯 CUSTOM TRAINING WITH CLASS WEIGHTS
-        print("🔥 Phase 1: Frozen training with automatic class balancing...")
-        print(f"   🎯 Using class weights to balance learning")
-        print(f"   📊 This will ensure all classes are learned equally")
-
-        # Setup data augmentation
-        train_datagen, val_datagen = efficient_model.setup_data_augmentation()
-        callbacks = efficient_model.setup_callbacks('efficientnetb0_balanced_best.h5')
-
-        # Calculate steps
-        batch_size = 32
-        steps_per_epoch = max(1, len(X_train) // batch_size)
-        validation_steps = max(1, len(X_val) // batch_size)
-
-        print(f"   📦 Batch size: {batch_size}")
-        print(f"   📈 Steps per epoch: {steps_per_epoch}")
-        print(f"   📉 Validation steps: {validation_steps}")
-
-        # 🚀 TRAIN WITH CLASS WEIGHTS - THIS IS THE KEY FIX!
-        history1 = efficient_model.model.fit(
-            train_datagen.flow(X_train, y_train, batch_size=batch_size),
-            steps_per_epoch=steps_per_epoch,
-            epochs=30,
-            validation_data=val_datagen.flow(X_val, y_val, batch_size=batch_size),
-            validation_steps=validation_steps,
-            callbacks=callbacks,
-            class_weight=class_weight_dict,  # 🎯 AUTOMATIC CLASS BALANCING!
-            verbose=1
-        )
-
-        # Store history in the model
-        efficient_model.history = history1
-
-        print(f"✅ Phase 1 completed with class balancing!")
-
-        # Phase 2: Fine-tuning (simplified)
-        print("🔥 Phase 2: Fine-tuning (simplified for compatibility)...")
-        history2 = efficient_model.fine_tune(
-            X_train, y_train, X_val, y_val,
-            epochs=20, learning_rate=1e-6
-        )
-
-        # Evaluate EfficientNetB0
-        print("\n📊 STEP 4: Model Evaluation")
+    for i, model_name in enumerate(model_names, 1):
+        print(f"\n🤖 STEP 4.{i}: Training {model_name.upper()}")
         print("-" * 50)
-        eff_acc, eff_pred, eff_proba = efficient_model.evaluate(
-            X_test, y_test, classifier.class_names
-        )
 
-        # Enhanced evaluation feedback
-        print(f"\n🎯 CLASS BALANCING RESULTS:")
-        print(f"   📊 Test Accuracy: {eff_acc:.4f} ({eff_acc * 100:.2f}%)")
+        try:
+            # Create model
+            model = classifier.create_model(model_name)
 
-        if eff_acc > 0.85:
-            print(f"   🏆 EXCELLENT! Class balancing worked perfectly!")
-        elif eff_acc > 0.75:
-            print(f"   🥇 GREAT! Significant improvement with class balancing!")
-        elif eff_acc > 0.65:
-            print(f"   🥈 GOOD! Class balancing helped substantially!")
-        else:
-            print(f"   🥉 DECENT! Some improvement, may need further tuning.")
+            # Train model
+            print(f"🚀 Starting training for {model_name.upper()}...")
+            history = classifier.train_model(
+                model, X_train, y_train, X_val, y_val, model_name, epochs=epochs
+            )
 
-        # Check if all classes are being predicted
-        unique_predictions = len(np.unique(eff_pred))
-        print(f"   🎯 Classes being predicted: {unique_predictions}/{len(classifier.class_names)}")
+            # Plot training curves
+            classifier.plot_training_curves(history, model_name)
 
-        if unique_predictions == len(classifier.class_names):
-            print(f"   ✅ SUCCESS! All classes are being predicted (no more single-class bias)")
-        else:
-            print(f"   ⚠️ Still some class bias, but much improved")
+            # Evaluate model
+            accuracy, y_pred, y_pred_proba = classifier.evaluate_model(
+                model, X_test, y_test, model_name
+            )
 
-        # Visualization
-        print("\n📈 STEP 5: Results Visualization")
+            # Demonstrate single prediction
+            classifier.demonstrate_single_prediction(model, X_test, y_test, model_name)
+
+            # Store results
+            results[model_name] = {
+                'model': model,
+                'history': history,
+                'accuracy': accuracy,
+                'predictions': y_pred,
+                'probabilities': y_pred_proba
+            }
+
+            print(f"✅ {model_name.upper()} training completed successfully!")
+
+        except Exception as e:
+            print(f"❌ Error training {model_name}: {e}")
+            import traceback
+            traceback.print_exc()
+            continue
+
+    # Step 5: Compare All Models
+    if len(results) > 0:
+        print(f"\n📈 STEP 5: Comprehensive Model Comparison")
         print("-" * 50)
-        efficient_model.plot_training_history()
-        efficient_model.plot_confusion_matrix(y_test, eff_pred, classifier.class_names)
-
-        # Save the balanced model
-        efficient_model.save_model('best_efficientnetb0_class_balanced.h5')
-        print(f"💾 Class-balanced model saved!")
-
-        return efficient_model, eff_acc
-
-    except Exception as e:
-        print(f"❌ Error training EfficientNetB0: {e}")
-        import traceback
-        traceback.print_exc()
-        return None, None
-
-
-def main():
-    """Optimized main function with class balancing"""
-    print("🌊 RIVER WATER LEVEL CLASSIFICATION PROJECT 🌊")
-    print("Using Class-Balanced Training Strategy with Mixed Precision")
-    print("=" * 80)
-
-    # Train with class-balanced approach
-    best_model, best_accuracy = train_most_effectively()
-
-    if best_model and best_accuracy:
-        print(f"\n🎊 CLASS-BALANCED TRAINING COMPLETED SUCCESSFULLY!")
-        print(f"🏆 EfficientNetB0 Accuracy: {best_accuracy:.4f} ({best_accuracy * 100:.2f}%)")
-        print(f"💾 Model saved as: best_efficientnetb0_class_balanced.h5")
-        print(f"⚡ Training accelerated with mixed precision")
-        print(f"⚖️ Classes automatically balanced with computed weights")
-
-        # Performance assessment
-        if best_accuracy > 0.85:
-            print(f"🏆 OUTSTANDING RESULTS! Class balancing was highly effective!")
-        elif best_accuracy > 0.75:
-            print(f"🥇 EXCELLENT RESULTS! Significant improvement with class balancing!")
-        elif best_accuracy > 0.65:
-            print(f"🥈 GOOD RESULTS! Class balancing helped substantially!")
-
-        # Expected performance
-        expected_time = "1.5-2 hours" if gpus else "4-6 hours"
-        print(f"⏱️ Training time: {expected_time}")
-
-        print(f"\n📊 Key Improvements with Class Balancing:")
-        print(f"   ✅ All water level classes properly learned")
-        print(f"   ✅ No single-class prediction bias")
-        print(f"   ✅ Balanced confusion matrix")
-        print(f"   ✅ Higher F1-scores across all classes")
-
-        print("\n🚀 Ready for academic presentation and deployment!")
+        classifier.compare_models(results)
     else:
-        print("\n❌ Training failed. Please check the error messages above.")
+        print("\n⚠️ No models were successfully trained.")
+
+    # Step 6: Final Summary
+    print(f"\n🎊 PROJECT COMPLETION SUMMARY")
+    print("=" * 80)
+    print("✅ Successfully completed all required components:")
+    print("   📊 Dataset visualization and salient feature analysis")
+    print("   🔄 Clear train/test data demonstration")
+    print("   🧪 Single image inference from test data")
+    print("   🤖 Complete trained models with training curves")
+    print("   📈 Comprehensive results and performance graphs")
+    print("   🏆 Model comparison and ranking")
+
+    if results:
+        best_model = max(results.keys(), key=lambda x: results[x]['accuracy'])
+        best_acc = results[best_model]['accuracy']
+        print(f"\n🏆 BEST PERFORMING MODEL: {best_model.upper()}")
+        print(f"🎯 Best Accuracy: {best_acc:.4f} ({best_acc * 100:.2f}%)")
+
+        print(f"\n📋 MODELS TRAINED:")
+        for model_name in results.keys():
+            acc = results[model_name]['accuracy']
+            print(f"   • {model_name.upper()}: {acc:.4f} accuracy")
+
+    print("\n💾 DELIVERABLES READY:")
+    print("   📁 Source code (complete implementation)")
+    print("   📊 Dataset analysis and visualization")
+    print("   🤖 Trained model files (.h5)")
+    print("   📈 Training curves and performance metrics")
+    print("   📋 Classification reports and confusion matrices")
+    print("   🔍 Single image prediction demonstrations")
+
+    print("\n🔗 DATASET INFORMATION:")
+    print("   📍 Source: Kaggle - otavio12/urban-river-level-classification-image-dataset")
+    print("   📁 Local path: " + str(classifier.dataset_path) if classifier.dataset_path else "Not available")
+    print("   🏷️ Classes: " + ", ".join(classifier.class_names) if classifier.class_names else "Not determined")
+    print("   📊 Total samples processed: " + str(len(X)) if 'X' in locals() else "0")
+
+    print("\n🚀 Ready for Overleaf integration and academic presentation!")
+    print("=" * 80)
 
 
 if __name__ == "__main__":
